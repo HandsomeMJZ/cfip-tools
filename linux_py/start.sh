@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-export GITHUB_TOKEN="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"
+export GITHUB_TOKEN="ghp_xxxxx"
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-export GITHUB_REPO="${GITHUB_REPO:-https://github.com/HandsomeMJZ/cfip.git}"
+export GITHUB_REPO="${GITHUB_REPO:-https://github.com/xxxxx/xxxxx.git}"
 
 require_result_files() {
     local file
