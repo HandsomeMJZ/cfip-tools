@@ -62,6 +62,7 @@ typedef struct {
     int    top_per_region;
     int    max_nodes;
     int    verbose;
+    int    NO;
     char   fast_label[128];
 
     int  github_upload_enabled;
@@ -213,6 +214,17 @@ static void copy_text(char *dst, size_t dst_size, const char *src) {
     snprintf(dst, dst_size, "%s", src ? src : "");
 }
 
+static void strip_region_number(const char *region, char *out, size_t out_size) {
+    size_t n, i;
+    copy_text(out, out_size, region);
+    n = strlen(out);
+    i = n;
+    while (i > 0 && isdigit((unsigned char)out[i - 1])) i--;
+    if (i < n && i > 1 && out[i - 1] == '_') {
+        out[i - 1] = '\0';
+    }
+}
+
 /* ──────────────────────────────────────────────────────────
    配置 — 默认值 / 加载 / 保存
    ────────────────────────────────────────────────────────── */
@@ -239,6 +251,7 @@ static void default_config(Config *cfg) {
     cfg->top_per_region            = 8;
     cfg->max_nodes                 = 0;
     cfg->verbose                   = 0;
+    cfg->NO                        = 0;
     copy_text(cfg->fast_label,        sizeof(cfg->fast_label),        "优选高速");
     cfg->github_upload_enabled     = 0;
     copy_text(cfg->github_repo,       sizeof(cfg->github_repo),       "https://github.com/HandsomeMJZ/cfip.git");
@@ -284,6 +297,7 @@ static void apply_config_value(Config *cfg, const char *key, const char *value) 
     else if (str_ieq(key,"top_per_region"))         cfg->top_per_region=atoi(value);
     else if (str_ieq(key,"max_nodes"))              cfg->max_nodes=atoi(value);
     else if (str_ieq(key,"verbose"))                cfg->verbose=parse_bool(value,cfg->verbose);
+    else if (str_ieq(key,"NO"))                     cfg->NO=parse_bool(value,cfg->NO);
     else if (str_ieq(key,"fast_label"))             copy_text(cfg->fast_label,sizeof(cfg->fast_label),value);
     else if (str_ieq(key,"github_upload_enabled"))  cfg->github_upload_enabled=parse_bool(value,cfg->github_upload_enabled);
     else if (str_ieq(key,"github_repo"))            copy_text(cfg->github_repo,sizeof(cfg->github_repo),value);
@@ -358,6 +372,7 @@ static int save_config(const Config *cfg, const char *path) {
     fprintf(fp, "top_per_region=%d\n", cfg->top_per_region);
     fprintf(fp, "max_nodes=%d\n", cfg->max_nodes);
     fprintf(fp, "verbose=%s\n", cfg->verbose ? "true" : "false");
+    fprintf(fp, "NO=%s\n", cfg->NO ? "true" : "false");
     fprintf(fp, "fast_label=%s\n\n", cfg->fast_label);
 
     fprintf(fp, "# ── GitHub 推送（github_token 可留空，程序会读取环境变量）──\n");
@@ -454,6 +469,7 @@ static void run_setup_wizard(Config *cfg, const char *config_path, int first_run
     }
     printf("  %s直接回车保留括号内的默认值。%s\n\n", COL_DIM, COL_RESET);
 
+    cfg->NO = prompt_bool("启用优选序号 (#HK_1)", cfg->NO);
     cfg->github_upload_enabled = prompt_bool("启用 GitHub 自动推送", cfg->github_upload_enabled);
 
     read_prompt("GitHub 仓库地址 (https://github.com/user/repo.git)\n"
@@ -625,6 +641,7 @@ static void wait_and_close_threads(HANDLE *threads, int count) {
 
 static int parse_node_line(char *line, Node *node) {
     char *hash, *colon, *address, *region, *port_text;
+    char normalized_region[128];
     int port;
     char *p = trim(line);
     if (*p == '\0' || *p == '#') return 0;
@@ -640,7 +657,8 @@ static int parse_node_line(char *line, Node *node) {
     port = atoi(port_text);
     if (port < 1 || port > 65535) return 0;
     copy_text(node->ip,     sizeof(node->ip),     trim(address));
-    copy_text(node->region, sizeof(node->region), region);
+    strip_region_number(region, normalized_region, sizeof(normalized_region));
+    copy_text(node->region, sizeof(node->region), normalized_region);
     node->port = port;
     return node->ip[0] != '\0';
 }
@@ -947,9 +965,19 @@ static int cmp_speed_output(const void *a, const void *b) {
     return strcmp(x->node.ip, y->node.ip);
 }
 
+static void format_output_region(const char *region, int numbered, int rank, char *out, size_t out_size) {
+    if (numbered)
+        snprintf(out, out_size, "%s_%d", region, rank);
+    else
+        copy_text(out, out_size, region);
+}
+
 static int write_results(const char *path, const SpeedArray *results, const Config *cfg, int only_fast) {
     FILE *fp;
     size_t i;
+    char last_region[128] = "";
+    int region_rank = 0;
+    char output_region[160];
     ensure_parent_dir(path);
     fp = fopen(path, "wb");
     if (!fp) {
@@ -959,12 +987,18 @@ static int write_results(const char *path, const SpeedArray *results, const Conf
     for (i = 0; i < results->count; i++) {
         const SpeedResult *r = &results->items[i];
         if (only_fast && !r->is_fast) continue;
+        if (strcmp(last_region, r->node.region) != 0) {
+            copy_text(last_region, sizeof(last_region), r->node.region);
+            region_rank = 0;
+        }
+        region_rank++;
+        format_output_region(r->node.region, cfg->NO, region_rank, output_region, sizeof(output_region));
         if (r->is_fast)
             fprintf(fp, "%s:%d#%s [%s%.2fms]\n",
-                    r->node.ip, r->node.port, r->node.region, cfg->fast_label, r->latency_ms);
+                    r->node.ip, r->node.port, output_region, cfg->fast_label, r->latency_ms);
         else
             fprintf(fp, "%s:%d#%s [%.2fms]\n",
-                    r->node.ip, r->node.port, r->node.region, r->latency_ms);
+                    r->node.ip, r->node.port, output_region, r->latency_ms);
     }
     fclose(fp);
     return 1;
@@ -1203,6 +1237,7 @@ static void print_usage(void) {
     printf("%s用法：%s cf_updater.exe [选项]\n\n", COL_BOLD, COL_RESET);
     printf("  %s--config <文件>%s  指定配置文件路径（默认：setting.config）\n", COL_CYAN, COL_RESET);
     printf("  %s--setup%s          重新运行配置向导\n",                          COL_CYAN, COL_RESET);
+    printf("  %s--NO [true|false]%s  启用或关闭优选序号输出\n",                  COL_CYAN, COL_RESET);
     printf("  %s--upload%s         本次运行强制开启 GitHub 推送\n",               COL_CYAN, COL_RESET);
     printf("  %s--no-upload%s      本次运行禁用 GitHub 推送\n",                   COL_CYAN, COL_RESET);
     printf("  %s--push-only%s      仅更新 README 并推送现有结果\n",               COL_CYAN, COL_RESET);
@@ -1255,6 +1290,14 @@ int main(int argc, char **argv) {
     for (i = 1; i < (size_t)argc; i++) {
         if      (strcmp(argv[i], "--upload")    == 0) cfg.github_upload_enabled = 1;
         else if (strcmp(argv[i], "--no-upload") == 0) cfg.github_upload_enabled = 0;
+        else if (strcmp(argv[i], "--NO")        == 0) {
+            if (i + 1 < (size_t)argc && argv[i + 1][0] != '-')
+                cfg.NO = parse_bool(argv[++i], cfg.NO);
+            else
+                cfg.NO = 1;
+        }
+        else if (strncmp(argv[i], "--NO=", 5)   == 0) cfg.NO = parse_bool(argv[i] + 5, cfg.NO);
+        else if (strcmp(argv[i], "--no-NO")     == 0) cfg.NO = 0;
         else if (strcmp(argv[i], "--push-only") == 0) push_only = 1;
         else if (strcmp(argv[i], "--setup")     == 0) setup_requested = 1;
         else if (strcmp(argv[i], "--help")      == 0 ||
@@ -1273,6 +1316,7 @@ int main(int argc, char **argv) {
     print_kv("测速并发：",    "%d", cfg.speed_workers);
     print_kv("高速阈值：",    "%.2f Mbps", cfg.min_speed_mbps);
     print_kv("每区取前 N：",  "%d", cfg.top_per_region);
+    print_kv("优选序号：",    "%s", cfg.NO ? "开启" : "关闭");
     print_kv("GitHub 推送：", "%s", cfg.github_upload_enabled ? "启用" : "关闭");
 
     if (!config_loaded || setup_requested) {
@@ -1346,7 +1390,7 @@ int main(int argc, char **argv) {
     printf("\n");
     print_divider(COL_CYAN);
     printf("\n按任意键退出");
-    scanf("%c", NULL);
+    getchar();
 
     free(nodes.items);
     free(tcp_results.items);
