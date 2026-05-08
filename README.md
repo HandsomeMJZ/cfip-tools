@@ -5,7 +5,11 @@
 ---
 ## 我的预选订阅仓库
 
-'https://github.com/HandsomeMJZ/cfip'
+>https://github.com/HandsomeMJZ/cfip
+
+## ⚠️特别提醒!!!
+
+**请不要在运行期间使用tun模式代理!!!否则会严重消耗KV数值!!!##
 
 ## 📋 目录
 
