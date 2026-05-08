@@ -18,7 +18,7 @@ require_result_files() {
 }
 
 run_update() {
-    python3 "$ROOT/update.py" --no-github-sync
+    python3 "$ROOT/update.py" --NO --no-github-sync #删除掉--NO可以关闭地区编号显示
     python3 "$ROOT/update_md.py"
 }
 
