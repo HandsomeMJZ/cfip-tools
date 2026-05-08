@@ -3,6 +3,9 @@
 > 自动测试 Cloudflare CDN 节点的 TCP 延迟与下载速度，筛选最优 IP 并可自动推送至 GitHub，供 EdgeTunnel 等工具订阅使用。
 
 ---
+## 我的预选订阅仓库
+
+'https://github.com/HandsomeMJZ/cfip'
 
 ## 📋 目录
 
