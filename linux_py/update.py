@@ -42,6 +42,22 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
+def parse_bool(value: str) -> bool:
+    text = value.strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def strip_region_number(region: str) -> str:
+    base, sep, suffix = region.rpartition("_")
+    if sep and base and suffix.isdigit():
+        return base
+    return region
+
+
 @dataclass(frozen=True)
 class GitHubConfig:
     repo: str | None
@@ -67,6 +83,7 @@ class AppConfig:
     min_speed_mbps: float
     top_per_region: int
     verbose: bool
+    numbered_regions: bool
     github: GitHubConfig
 
 
@@ -113,6 +130,13 @@ def parse_args() -> AppConfig:
     parser.add_argument("--min-speed", type=float, default=DEFAULT_MIN_SPEED_MBPS, help="minimum fast speed in Mbps")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_PER_REGION, help="latency candidates kept per region")
     parser.add_argument("--verbose", action="store_true", help="print each successful test result")
+    parser.add_argument(
+        "--NO",
+        nargs="?",
+        const="true",
+        default=os.environ.get("NO", "false"),
+        help="number output region labels, for example #HK_1",
+    )
     parser.add_argument("--no-github-sync", action="store_true", help="disable built-in GitHub sync")
     parser.add_argument("--github-repo", default=os.environ.get("GITHUB_REPO"), help="repository URL or GITHUB_REPO")
     parser.add_argument(
@@ -145,6 +169,11 @@ def parse_args() -> AppConfig:
     parser.add_argument("--github-timeout", type=float, default=180, help="git command timeout in seconds")
     args = parser.parse_args()
 
+    try:
+        numbered_regions = parse_bool(args.NO)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     return AppConfig(
         input_file=args.input,
         full_output_file=args.output,
@@ -157,6 +186,7 @@ def parse_args() -> AppConfig:
         min_speed_mbps=args.min_speed,
         top_per_region=args.top,
         verbose=args.verbose,
+        numbered_regions=numbered_regions,
         github=GitHubConfig(
             repo=args.github_repo,
             branch=args.github_branch,
@@ -187,7 +217,7 @@ def parse_node(line: str) -> Node | None:
 
     if not ip or not 1 <= port <= 65535:
         return None
-    return Node(ip=ip, port=port, region=region)
+    return Node(ip=ip, port=port, region=strip_region_number(region))
 
 
 def load_nodes(path: Path) -> list[Node]:
@@ -408,12 +438,15 @@ async def run_speed_tests(
     return results
 
 
-def write_results(path: Path, results: Iterable[SpeedResult]) -> None:
+def write_results(path: Path, results: Iterable[SpeedResult], numbered_regions: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as file:
+        region_counts: dict[str, int] = defaultdict(int)
         for result in results:
             label = FAST_LABEL if result.is_fast else ""
-            file.write(f"{result.node.raw} [{label}{result.latency_ms}ms]\n")
+            region_counts[result.node.region] += 1
+            region = f"{result.node.region}_{region_counts[result.node.region]}" if numbered_regions else result.node.region
+            file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{result.latency_ms}ms]\n")
 
 
 def filter_fast_results(results: Iterable[SpeedResult]) -> list[SpeedResult]:
@@ -608,8 +641,8 @@ async def run(config: AppConfig) -> int:
         speed_results = []
 
     best_results = filter_fast_results(speed_results)
-    write_results(config.full_output_file, speed_results)
-    write_results(config.best_output_file, best_results)
+    write_results(config.full_output_file, speed_results, config.numbered_regions)
+    write_results(config.best_output_file, best_results, config.numbered_regions)
     print_summary(config, len(nodes), len(tcp_results), len(speed_results), len(best_results))
 
     if config.github.enabled:
