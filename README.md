@@ -174,6 +174,7 @@ cf_updater.exe --push-only
 | `github_push_retries`    | `3`                       | 推送失败后的最大重试次数                               |
 | `github_retry_delay_sec` | `10`                      | 每次重试前的等待时间（秒）                             |
 | `git_timeout_sec`        | `180`                     | 单条 git 命令的超时时间（秒）                          |
+| `NO`                     | `false`                   | 开启相同地区编号显示                                   |
 
 ---
 
