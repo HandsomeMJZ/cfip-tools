@@ -14,7 +14,7 @@
 #include <time.h>
 
 /* ─── 版本 ─────────────────────────────────────────────── */
-#define APP_VERSION "1.1.0"
+#define APP_VERSION "1.1.1"
 
 /* ─── 测速参数 ──────────────────────────────────────────── */
 #define SPEED_DOMAIN "speed.cloudflare.com"
@@ -163,7 +163,7 @@ static void render_progress(LONG done, size_t total, const char *label) {
 static void print_banner(void) {
     printf("%s", COL_CYAN COL_BOLD);
     printf("  ╔═══════════════════════════════════════════════════╗\n");
-    printf("  ║      Cloudflare IP 优选工具  v%-6s             ║\n", APP_VERSION);
+    printf("  ║       Cloudflare IP 优选工具  v%-6s             ║\n", APP_VERSION);
     printf("  ║      CF IP Speed Tester  -  Windows Edition       ║\n");
     printf("  ╚═══════════════════════════════════════════════════╝\n");
     printf("%s\n", COL_RESET);
@@ -204,8 +204,8 @@ static int str_ieq(const char *a, const char *b) {
 }
 
 static int parse_bool(const char *value, int fallback) {
-    if (str_ieq(value,"1")||str_ieq(value,"true")||str_ieq(value,"yes")||str_ieq(value,"on"))  return 1;
-    if (str_ieq(value,"0")||str_ieq(value,"false")||str_ieq(value,"no")||str_ieq(value,"off")) return 0;
+    if (str_ieq(value,"1")||str_ieq(value,"true")||str_ieq(value,"yes")||str_ieq(value,"y")||str_ieq(value,"on"))  return 1;
+    if (str_ieq(value,"0")||str_ieq(value,"false")||str_ieq(value,"no")||str_ieq(value,"n")||str_ieq(value,"off")) return 0;
     return fallback;
 }
 
@@ -270,10 +270,10 @@ static void default_config(Config *cfg) {
 }
 
 static void apply_localized_defaults(Config *cfg) {
-    copy_text(cfg->test_location,    sizeof(cfg->test_location),    "中国四川联通");
+    copy_text(cfg->test_location,    sizeof(cfg->test_location),    "China");
     copy_text(cfg->update_frequency, sizeof(cfg->update_frequency), "每半小时自动更新");
     copy_text(cfg->fast_label,       sizeof(cfg->fast_label),       "优选高速");
-    copy_text(cfg->github_message,   sizeof(cfg->github_message),   "更新 IP 结果和 README");
+    copy_text(cfg->github_message,   sizeof(cfg->github_message),   "Update IP and README");
 }
 
 static void apply_config_value(Config *cfg, const char *key, const char *value) {
@@ -549,6 +549,104 @@ static char *quote_arg(const char *arg, char *out, size_t out_size) {
 static int run_command(const char *cmd) {
     int code = system(cmd);
     return (code == -1) ? -1 : code;
+}
+
+static int command_available(const char *exe_name) {
+    char path[MAX_PATH];
+    DWORD len = SearchPathA(NULL, exe_name, NULL, sizeof(path), path, NULL);
+    return len > 0 && len < sizeof(path);
+}
+
+static void append_process_path(const char *dir) {
+    char path[32767];
+    char merged[32767];
+    DWORD len = GetEnvironmentVariableA("PATH", path, sizeof(path));
+    if (len == 0 || len >= sizeof(path)) return;
+    snprintf(merged, sizeof(merged), "%s;%s", path, dir);
+    SetEnvironmentVariableA("PATH", merged);
+}
+
+static void refresh_git_path_from_common_locations(void) {
+    if (command_available("git.exe")) return;
+    if (file_exists("C:\\Program Files\\Git\\cmd\\git.exe")) {
+        append_process_path("C:\\Program Files\\Git\\cmd");
+    } else if (file_exists("C:\\Program Files (x86)\\Git\\cmd\\git.exe")) {
+        append_process_path("C:\\Program Files (x86)\\Git\\cmd");
+    }
+}
+
+static void open_git_download_page(void) {
+    printf("  %s正在打开 Git 官方下载页面...%s\n", COL_CYAN, COL_RESET);
+    run_command("start \"\" \"https://git-scm.com/download/win\"");
+}
+
+static int install_git_with_winget(void) {
+    int rc;
+    if (!command_available("winget.exe")) {
+        fprintf(stderr,
+                "  %s未检测到 winget，无法自动安装 Git。将打开官网，请手动安装 Git for Windows。%s\n",
+                COL_RED, COL_RESET);
+        open_git_download_page();
+        return 0;
+    }
+    printf("  %s正在通过 winget 安装 Git for Windows...%s\n", COL_CYAN, COL_RESET);
+    rc = run_command("winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements");
+    if (rc != 0) {
+        fprintf(stderr,
+                "  %swinget 安装 Git 失败。将打开官网，请手动安装 Git for Windows。%s\n",
+                COL_YELLOW, COL_RESET);
+        open_git_download_page();
+        return 0;
+    }
+    return 1;
+}
+
+static int ensure_git_available(int *push_available) {
+    refresh_git_path_from_common_locations();
+    if (command_available("git.exe")) {
+        *push_available = 1;
+        printf("  %s✓ Git 已就绪，运行环境检查通过%s\n", COL_GREEN, COL_RESET);
+        return 1;
+    }
+
+    *push_available = 0;
+    fprintf(stderr, "  %s未检测到 Git，GitHub 推送需要先安装 Git。%s\n", COL_YELLOW, COL_RESET);
+    if (!prompt_bool("是否现在使用 winget 安装 Git for Windows", 0)) {
+        fprintf(stderr, "  %s已取消安装，当前无法使用 GitHub 推送功能。%s\n",
+                COL_RED, COL_RESET);
+        return 1;
+    }
+
+    if (!install_git_with_winget()) {
+        fprintf(stderr, "  %s当前无法使用 GitHub 推送功能。安装 Git 后请重新运行。%s\n",
+                COL_RED, COL_RESET);
+        return 1;
+    }
+    refresh_git_path_from_common_locations();
+    if (command_available("git.exe")) {
+        *push_available = 1;
+        printf("  %s✓ Git 安装完成，运行环境检查通过%s\n", COL_GREEN, COL_RESET);
+        return 1;
+    }
+
+    fprintf(stderr,
+            "  %sGit 可能已安装，但当前终端尚未刷新 PATH。当前无法使用 GitHub 推送功能，请重新打开终端后再运行。%s\n",
+            COL_YELLOW, COL_RESET);
+    return 1;
+}
+
+static int ensure_runtime_environment(Config *cfg, int push_only) {
+    int push_available = 0;
+    print_section("🧰", "运行前环境检查");
+    if (!ensure_git_available(&push_available)) return 0;
+    if (!push_available) {
+        cfg->github_upload_enabled = 0;
+        if (push_only) {
+            fprintf(stderr, "  %s仅推送模式需要 Git，已停止运行。%s\n", COL_RED, COL_RESET);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -1322,6 +1420,10 @@ int main(int argc, char **argv) {
     if (!config_loaded || setup_requested) {
         run_setup_wizard(&cfg, config_path, !config_loaded);
         clamp_config(&cfg);
+    }
+
+    if (!ensure_runtime_environment(&cfg, push_only)) {
+        return 1;
     }
 
     if (push_only) {
