@@ -159,6 +159,7 @@ cf_updater.exe --push-only
 | `min_speed_mbps`          | `10.00` | 高速节点的最低速度阈值（Mbps），低于此值不写入 `best_ips.txt` |
 | `fast_label`              | `优选高速` | 高速节点在输出文件中的标签前缀                              |
 | `verbose`                 | `false` | 是否打印每个节点的详细测速日志（`true`/`false`）              |
+| `NO`                     | `false`                   | 开启相同地区编号显示                                   |
 
 ---
 
@@ -180,7 +181,6 @@ cf_updater.exe --push-only
 | `github_push_retries`    | `3`                       | 推送失败后的最大重试次数                               |
 | `github_retry_delay_sec` | `10`                      | 每次重试前的等待时间（秒）                             |
 | `git_timeout_sec`        | `180`                     | 单条 git 命令的超时时间（秒）                          |
-| `NO`                     | `false`                   | 开启相同地区编号显示                                   |
 
 ---
 
