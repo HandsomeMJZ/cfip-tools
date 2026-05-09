@@ -371,7 +371,7 @@ static int save_config(const Config *cfg, const char *path) {
     fprintf(fp, "speed_timeout_sec=%d\n", cfg->speed_timeout_sec);
     fprintf(fp, "speed_process_buffer_sec=%d\n", cfg->speed_process_buffer_sec);
     fprintf(fp, "speed_workers=%d\n", cfg->speed_workers);
-    fprintf(fp, "min_speed_mbps=%.2f\n", cfg->min_speed_mbps);
+    fprintf(fp, "min_speed_mbps=%.1f\n", cfg->min_speed_mbps);
     fprintf(fp, "top_per_region=%d\n", cfg->top_per_region);
     fprintf(fp, "max_nodes=%d\n", cfg->max_nodes);
     fprintf(fp, "verbose=%s\n", cfg->verbose ? "true" : "false");
@@ -874,7 +874,7 @@ static DWORD WINAPI tcp_worker(LPVOID param) {
             tcp_array_push(ctx->results, result);
             LeaveCriticalSection(&ctx->lock);
             if (ctx->config->verbose)
-                printf("  [延迟] %s:%d#%s -> %.2f ms\n", node.ip, node.port, node.region, latency);
+                printf("  [延迟] %s:%d#%s -> %.0f ms\n", node.ip, node.port, node.region, latency);
         }
         done = InterlockedIncrement(&ctx->done);
         if (done == (LONG)ctx->count || done % 500 == 0)
@@ -1009,7 +1009,7 @@ static DWORD WINAPI speed_worker(LPVOID param) {
         LeaveCriticalSection(&ctx->lock);
 
         if (ctx->config->verbose)
-            printf("  [测速] %s:%d#%s -> %.2f Mbps %s%s%s\n",
+            printf("  [测速] %s:%d#%s -> %.1f Mbps %s%s%s\n",
                    result.node.ip, result.node.port, result.node.region, result.speed_mbps,
                    result.is_fast ? COL_GREEN : COL_DIM,
                    result.is_fast ? "高速" : "普通", COL_RESET);
@@ -1099,14 +1099,14 @@ static int write_results(const char *path, const SpeedArray *results, const Conf
         format_output_region(r->node.region, cfg->NO, region_rank, output_region, sizeof(output_region));
         fprintf(fp, "%s:%d#%s", r->node.ip, r->node.port, output_region);
         if (r->is_fast && cfg->show_latency)
-            fprintf(fp, " [%s%.2fms]", cfg->fast_label, r->latency_ms);
+            fprintf(fp, " [%s%.0fms]", cfg->fast_label, r->latency_ms);
         else if (r->is_fast) {
             copy_text(fast_label, sizeof(fast_label), cfg->fast_label);
             rtrim_inplace(fast_label);
             fprintf(fp, " [%s]", fast_label);
         }
         else if (cfg->show_latency)
-            fprintf(fp, " [%.2fms]", r->latency_ms);
+            fprintf(fp, " [%.0fms]", r->latency_ms);
         fprintf(fp, "\n");
     }
     fclose(fp);
@@ -1433,7 +1433,7 @@ int main(int argc, char **argv) {
     print_kv("配置文件：",    "%s", config_path);
     print_kv("TCP 并发：",    "%d", cfg.tcp_workers);
     print_kv("测速并发：",    "%d", cfg.speed_workers);
-    print_kv("高速阈值：",    "%.2f Mbps", cfg.min_speed_mbps);
+    print_kv("高速阈值：",    "%.1f Mbps", cfg.min_speed_mbps);
     print_kv("每区取前 N：",  "%d", cfg.top_per_region);
     print_kv("优选序号：",    "%s", cfg.NO ? "开启" : "关闭");
     print_kv("延迟显示：",    "%s", cfg.show_latency ? "开启" : "关闭");
