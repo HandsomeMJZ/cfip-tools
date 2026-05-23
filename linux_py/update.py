@@ -3,11 +3,12 @@ import asyncio
 import heapq
 import os
 import shutil
-import subprocess
+import subprocess  # nosec
 import sys
 import time
 import urllib.error
-import urllib.request
+
+import requests
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -222,12 +223,14 @@ def refresh_input_file(url: str, path: Path, timeout: float) -> bool:
     temp_path = path.with_name(f"{path.name}.download")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        request = urllib.request.Request(url, headers={"User-Agent": "cf-ip-updater/1.0"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if response.status != 200:
-                raise RuntimeError(f"HTTP {response.status}")
+        if not url.lower().startswith("https://"):
+            return False
+        with requests.get(url, headers={"User-Agent": "cf-ip-updater/1.0"}, timeout=timeout, stream=True) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
             with temp_path.open("wb") as file:
-                shutil.copyfileobj(response, file)
+                response.raw.decode_content = True
+                shutil.copyfileobj(response.raw, file)
 
         if temp_path.stat().st_size == 0:
             raise RuntimeError("downloaded file is empty")
@@ -235,7 +238,7 @@ def refresh_input_file(url: str, path: Path, timeout: float) -> bool:
         temp_path.replace(path)
         print(f"Downloaded input file from {url} to {path}")
         return True
-    except (OSError, RuntimeError, urllib.error.URLError) as exc:
+    except (OSError, RuntimeError, http.client.HTTPException) as exc:
         if temp_path.exists():
             try:
                 temp_path.unlink()
@@ -324,6 +327,12 @@ def get_curl_command() -> str | None:
 def measure_speed_with_curl(node: Node, timeout: float, process_buffer: float) -> float:
     curl = get_curl_command()
     if curl is None:
+        return 0.0
+
+    try:
+        import ipaddress
+        ipaddress.ip_address(node.ip)
+    except ValueError:
         return 0.0
 
     url = f"https://{SPEED_DOMAIN}:{node.port}{SPEED_PATH}?bytes={SPEED_BYTES}"
