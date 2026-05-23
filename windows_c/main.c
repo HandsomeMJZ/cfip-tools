@@ -8,13 +8,14 @@
 #include <errno.h>
 #include <io.h>
 #include <process.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 /* ─── 版本 ─────────────────────────────────────────────── */
-#define APP_VERSION "1.1.1"
+#define APP_VERSION "1.2.0"
 
 /* ─── 测速参数 ──────────────────────────────────────────── */
 #define SPEED_DOMAIN "speed.cloudflare.com"
@@ -64,6 +65,7 @@ typedef struct {
     int    verbose;
     int    NO;
     int    show_latency;
+    int    show_bandwidth;
     char   fast_label[128];
 
     int  github_upload_enabled;
@@ -82,6 +84,23 @@ typedef struct {
     int  git_timeout_sec;
     char git_http_proxy[512];
     char git_https_proxy[512];
+
+    int  r2_upload_enabled;
+    char r2_account_id[128];
+    char r2_bucket[256];
+    char r2_endpoint[1024];
+    char r2_access_key_id[512];
+    char r2_secret_access_key[1024];
+    char r2_access_key_env[128];
+    char r2_secret_key_env[128];
+    char r2_prefix[MAX_PATH];
+    char r2_full_path[MAX_PATH];
+    char r2_best_path[MAX_PATH];
+    int  r2_include_readme;
+    char r2_readme_path[MAX_PATH];
+    int  r2_timeout_sec;
+    int  r2_retries;
+    int  r2_retry_delay_sec;
 } Config;
 
 typedef struct { char ip[128]; int port; char region[128]; } Node;
@@ -196,6 +215,17 @@ static void rtrim_inplace(char *s) {
 }
 static char *trim(char *s) { s = ltrim(s); rtrim_inplace(s); return s; }
 
+static void strip_inline_comment(char *s) {
+    char *p;
+    for (p = s; *p; p++) {
+        if ((*p == '#' || *p == ';') && (p == s || isspace((unsigned char)p[-1]))) {
+            *p = '\0';
+            rtrim_inplace(s);
+            return;
+        }
+    }
+}
+
 static int str_ieq(const char *a, const char *b) {
     while (*a && *b) {
         if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
@@ -254,6 +284,7 @@ static void default_config(Config *cfg) {
     cfg->verbose                   = 0;
     cfg->NO                        = 0;
     cfg->show_latency              = 1;
+    cfg->show_bandwidth            = 1;
     copy_text(cfg->fast_label,        sizeof(cfg->fast_label),        "优选高速");
     cfg->github_upload_enabled     = 0;
     copy_text(cfg->github_repo,       sizeof(cfg->github_repo),       "https://github.com/HandsomeMJZ/cfip.git");
@@ -269,6 +300,22 @@ static void default_config(Config *cfg) {
     cfg->github_push_retries       = 3;
     cfg->github_retry_delay_sec    = 10;
     cfg->git_timeout_sec           = 180;
+    cfg->r2_upload_enabled         = 0;
+    copy_text(cfg->r2_account_id,          sizeof(cfg->r2_account_id),          "");
+    copy_text(cfg->r2_bucket,              sizeof(cfg->r2_bucket),              "");
+    copy_text(cfg->r2_endpoint,            sizeof(cfg->r2_endpoint),            "");
+    copy_text(cfg->r2_access_key_id,       sizeof(cfg->r2_access_key_id),       "");
+    copy_text(cfg->r2_secret_access_key,   sizeof(cfg->r2_secret_access_key),   "");
+    copy_text(cfg->r2_access_key_env,      sizeof(cfg->r2_access_key_env),      "R2_ACCESS_KEY_ID");
+    copy_text(cfg->r2_secret_key_env,      sizeof(cfg->r2_secret_key_env),      "R2_SECRET_ACCESS_KEY");
+    copy_text(cfg->r2_prefix,              sizeof(cfg->r2_prefix),              "");
+    copy_text(cfg->r2_full_path,           sizeof(cfg->r2_full_path),           "full_ips.txt");
+    copy_text(cfg->r2_best_path,           sizeof(cfg->r2_best_path),           "best_ips.txt");
+    cfg->r2_include_readme          = 1;
+    copy_text(cfg->r2_readme_path,         sizeof(cfg->r2_readme_path),         "README.MD");
+    cfg->r2_timeout_sec            = 120;
+    cfg->r2_retries                = 3;
+    cfg->r2_retry_delay_sec        = 10;
 }
 
 static void apply_localized_defaults(Config *cfg) {
@@ -301,6 +348,7 @@ static void apply_config_value(Config *cfg, const char *key, const char *value) 
     else if (str_ieq(key,"verbose"))                cfg->verbose=parse_bool(value,cfg->verbose);
     else if (str_ieq(key,"NO"))                     cfg->NO=parse_bool(value,cfg->NO);
     else if (str_ieq(key,"show_latency"))           cfg->show_latency=parse_bool(value,cfg->show_latency);
+    else if (str_ieq(key,"show_bandwidth"))         cfg->show_bandwidth=parse_bool(value,cfg->show_bandwidth);
     else if (str_ieq(key,"fast_label"))             copy_text(cfg->fast_label,sizeof(cfg->fast_label),value);
     else if (str_ieq(key,"github_upload_enabled"))  cfg->github_upload_enabled=parse_bool(value,cfg->github_upload_enabled);
     else if (str_ieq(key,"github_repo"))            copy_text(cfg->github_repo,sizeof(cfg->github_repo),value);
@@ -318,6 +366,22 @@ static void apply_config_value(Config *cfg, const char *key, const char *value) 
     else if (str_ieq(key,"git_timeout_sec"))        cfg->git_timeout_sec=atoi(value);
     else if (str_ieq(key,"git_http_proxy"))         copy_text(cfg->git_http_proxy,sizeof(cfg->git_http_proxy),value);
     else if (str_ieq(key,"git_https_proxy"))        copy_text(cfg->git_https_proxy,sizeof(cfg->git_https_proxy),value);
+    else if (str_ieq(key,"r2_upload_enabled"))      cfg->r2_upload_enabled=parse_bool(value,cfg->r2_upload_enabled);
+    else if (str_ieq(key,"r2_account_id"))          copy_text(cfg->r2_account_id,sizeof(cfg->r2_account_id),value);
+    else if (str_ieq(key,"r2_bucket"))              copy_text(cfg->r2_bucket,sizeof(cfg->r2_bucket),value);
+    else if (str_ieq(key,"r2_endpoint"))            copy_text(cfg->r2_endpoint,sizeof(cfg->r2_endpoint),value);
+    else if (str_ieq(key,"r2_access_key_id"))       copy_text(cfg->r2_access_key_id,sizeof(cfg->r2_access_key_id),value);
+    else if (str_ieq(key,"r2_secret_access_key"))   copy_text(cfg->r2_secret_access_key,sizeof(cfg->r2_secret_access_key),value);
+    else if (str_ieq(key,"r2_access_key_env"))      copy_text(cfg->r2_access_key_env,sizeof(cfg->r2_access_key_env),value);
+    else if (str_ieq(key,"r2_secret_key_env"))      copy_text(cfg->r2_secret_key_env,sizeof(cfg->r2_secret_key_env),value);
+    else if (str_ieq(key,"r2_prefix"))              copy_text(cfg->r2_prefix,sizeof(cfg->r2_prefix),value);
+    else if (str_ieq(key,"r2_full_path"))           copy_text(cfg->r2_full_path,sizeof(cfg->r2_full_path),value);
+    else if (str_ieq(key,"r2_best_path"))           copy_text(cfg->r2_best_path,sizeof(cfg->r2_best_path),value);
+    else if (str_ieq(key,"r2_include_readme"))      cfg->r2_include_readme=parse_bool(value,cfg->r2_include_readme);
+    else if (str_ieq(key,"r2_readme_path"))         copy_text(cfg->r2_readme_path,sizeof(cfg->r2_readme_path),value);
+    else if (str_ieq(key,"r2_timeout_sec"))         cfg->r2_timeout_sec=atoi(value);
+    else if (str_ieq(key,"r2_retries"))             cfg->r2_retries=atoi(value);
+    else if (str_ieq(key,"r2_retry_delay_sec"))     cfg->r2_retry_delay_sec=atoi(value);
 }
 
 static int load_config(Config *cfg, const char *path) {
@@ -331,7 +395,9 @@ static int load_config(Config *cfg, const char *path) {
         eq = strchr(p, '=');
         if (!eq) continue;
         *eq = '\0';
-        apply_config_value(cfg, trim(p), trim(eq + 1));
+        p = trim(p);
+        strip_inline_comment(eq + 1);
+        apply_config_value(cfg, p, trim(eq + 1));
     }
     fclose(fp);
     return 1;
@@ -349,55 +415,74 @@ static int save_config(const Config *cfg, const char *path) {
     fprintf(fp, "# 重新配置请运行：cf_updater.exe --setup\n\n");
 
     fprintf(fp, "# ── 输入源 ──\n");
-    fprintf(fp, "input_file=%s\n", cfg->input_file);
-    fprintf(fp, "input_url=%s\n", cfg->input_url);
-    fprintf(fp, "download_input=%s\n", cfg->download_input ? "true" : "false");
-    fprintf(fp, "download_timeout=%d\n\n", cfg->download_timeout);
+    fprintf(fp, "input_file=%s # 本地 IP 列表文件路径，程序从这里读取待测试节点\n", cfg->input_file);
+    fprintf(fp, "input_url=%s # 在线 IP 列表地址，download_input=true 时会先下载到 input_file\n", cfg->input_url);
+    fprintf(fp, "download_input=%s # 是否运行时自动下载 input_url 覆盖本地 input_file\n", cfg->download_input ? "true" : "false");
+    fprintf(fp, "download_timeout=%d # 下载 input_url 的连接和总超时时间，单位秒\n\n", cfg->download_timeout);
 
     fprintf(fp, "# ── 输出文件 ──\n");
-    fprintf(fp, "full_output_file=%s\n", cfg->full_output_file);
-    fprintf(fp, "best_output_file=%s\n\n", cfg->best_output_file);
+    fprintf(fp, "full_output_file=%s # 保存所有测速成功节点的本地文件\n", cfg->full_output_file);
+    fprintf(fp, "best_output_file=%s # 保存达到 min_speed_mbps 阈值节点的本地文件\n\n", cfg->best_output_file);
 
     fprintf(fp, "# ── README 生成 ──\n");
-    fprintf(fp, "update_readme=%s\n", cfg->update_readme ? "true" : "false");
-    fprintf(fp, "readme_file=%s\n", cfg->readme_file);
-    fprintf(fp, "raw_base_url=%s\n", cfg->raw_base_url);
-    fprintf(fp, "test_location=%s\n", cfg->test_location);
-    fprintf(fp, "update_frequency=%s\n\n", cfg->update_frequency);
+    fprintf(fp, "update_readme=%s # 是否每次运行后自动生成 README 文件\n", cfg->update_readme ? "true" : "false");
+    fprintf(fp, "readme_file=%s # README 本地输出文件路径\n", cfg->readme_file);
+    fprintf(fp, "raw_base_url=%s # README 中订阅链接的基础地址，通常是 GitHub Raw 或 R2 公网地址\n", cfg->raw_base_url);
+    fprintf(fp, "test_location=%s # README 中显示的测试地点说明\n", cfg->test_location);
+    fprintf(fp, "update_frequency=%s # README 中显示的更新频率说明\n\n", cfg->update_frequency);
 
     fprintf(fp, "# ── TCP 与下载测速 ──\n");
-    fprintf(fp, "tcp_timeout_ms=%d\n", cfg->tcp_timeout_ms);
-    fprintf(fp, "tcp_workers=%d\n", cfg->tcp_workers);
-    fprintf(fp, "speed_timeout_sec=%d\n", cfg->speed_timeout_sec);
-    fprintf(fp, "speed_process_buffer_sec=%d\n", cfg->speed_process_buffer_sec);
-    fprintf(fp, "speed_workers=%d\n", cfg->speed_workers);
-    fprintf(fp, "min_speed_mbps=%.1f\n", cfg->min_speed_mbps);
-    fprintf(fp, "top_per_region=%d\n", cfg->top_per_region);
-    fprintf(fp, "max_nodes=%d\n", cfg->max_nodes);
-    fprintf(fp, "verbose=%s\n", cfg->verbose ? "true" : "false");
-    fprintf(fp, "NO=%s\n", cfg->NO ? "true" : "false");
-    fprintf(fp, "show_latency=%s\n", cfg->show_latency ? "true" : "false");
-    fprintf(fp, "fast_label=%s\n\n", cfg->fast_label);
+    fprintf(fp, "tcp_timeout_ms=%d # TCP 延迟测试单个节点超时时间，单位毫秒\n", cfg->tcp_timeout_ms);
+    fprintf(fp, "tcp_workers=%d # TCP 延迟测试并发线程数，越大越快但越占资源\n", cfg->tcp_workers);
+    fprintf(fp, "speed_timeout_sec=%d # 下载测速单个节点总超时时间，单位秒\n", cfg->speed_timeout_sec);
+    fprintf(fp, "speed_process_buffer_sec=%d # 预留测速进程缓冲时间，当前用于兼容旧配置\n", cfg->speed_process_buffer_sec);
+    fprintf(fp, "speed_workers=%d # 下载测速并发线程数\n", cfg->speed_workers);
+    fprintf(fp, "min_speed_mbps=%.1f # 判定为高速节点的最低带宽阈值，单位 Mbps\n", cfg->min_speed_mbps);
+    fprintf(fp, "top_per_region=%d # 每个地区进入下载测速的 TCP 低延迟候选数量\n", cfg->top_per_region);
+    fprintf(fp, "max_nodes=%d # 最多读取多少个节点，0 表示不限制\n", cfg->max_nodes);
+    fprintf(fp, "verbose=%s # 是否打印每个节点的详细测速日志\n", cfg->verbose ? "true" : "false");
+    fprintf(fp, "NO=%s # 是否给同地区输出名追加 _1、_2 这样的序号\n", cfg->NO ? "true" : "false");
+    fprintf(fp, "show_latency=%s # 是否在输出节点标签中显示延迟，例如 [45ms]\n", cfg->show_latency ? "true" : "false");
+    fprintf(fp, "show_bandwidth=%s # 是否在输出节点标签中显示带宽，精确到个位 Mbps\n", cfg->show_bandwidth ? "true" : "false");
+    fprintf(fp, "fast_label=%s # 高速节点标签前缀，例如 [优选高速45ms 28Mbps]\n\n", cfg->fast_label);
 
     fprintf(fp, "# ── GitHub 推送（github_token 可留空，程序会读取环境变量）──\n");
-    fprintf(fp, "github_upload_enabled=%s\n", cfg->github_upload_enabled ? "true" : "false");
-    fprintf(fp, "github_repo=%s\n", cfg->github_repo);
-    fprintf(fp, "github_branch=%s\n", cfg->github_branch);
-    fprintf(fp, "github_workdir=%s\n", cfg->github_workdir);
-    fprintf(fp, "github_message=%s\n", cfg->github_message);
-    fprintf(fp, "github_token=%s\n", cfg->github_token);
-    fprintf(fp, "github_token_env=%s\n", cfg->github_token_env);
-    fprintf(fp, "github_full_path=%s\n", cfg->github_full_path);
-    fprintf(fp, "github_best_path=%s\n", cfg->github_best_path);
-    fprintf(fp, "github_include_readme=%s\n", cfg->github_include_readme ? "true" : "false");
-    fprintf(fp, "github_readme_path=%s\n", cfg->github_readme_path);
-    fprintf(fp, "github_push_retries=%d\n", cfg->github_push_retries);
-    fprintf(fp, "github_retry_delay_sec=%d\n", cfg->github_retry_delay_sec);
-    fprintf(fp, "git_timeout_sec=%d\n\n", cfg->git_timeout_sec);
+    fprintf(fp, "github_upload_enabled=%s # 是否启用 GitHub 自动上传 true=上传 false=跳过\n", cfg->github_upload_enabled ? "true" : "false");
+    fprintf(fp, "github_repo=%s # GitHub 仓库地址，支持 https://github.com/user/repo.git\n", cfg->github_repo);
+    fprintf(fp, "github_branch=%s # 上传到 GitHub 的目标分支\n", cfg->github_branch);
+    fprintf(fp, "github_workdir=%s # 本地临时克隆目录，用于 git add/commit/push\n", cfg->github_workdir);
+    fprintf(fp, "github_message=%s # GitHub 自动提交时使用的 commit message\n", cfg->github_message);
+    fprintf(fp, "github_token=%s # GitHub Token；留空时读取 github_token_env 指定的环境变量\n", cfg->github_token);
+    fprintf(fp, "github_token_env=%s # GitHub Token 的环境变量名\n", cfg->github_token_env);
+    fprintf(fp, "github_full_path=%s # full_output_file 上传到仓库内的目标路径\n", cfg->github_full_path);
+    fprintf(fp, "github_best_path=%s # best_output_file 上传到仓库内的目标路径\n", cfg->github_best_path);
+    fprintf(fp, "github_include_readme=%s # 是否同时上传 README 文件\n", cfg->github_include_readme ? "true" : "false");
+    fprintf(fp, "github_readme_path=%s # README 上传到仓库内的目标路径\n", cfg->github_readme_path);
+    fprintf(fp, "github_push_retries=%d # GitHub push 失败后的最大重试次数\n", cfg->github_push_retries);
+    fprintf(fp, "github_retry_delay_sec=%d # GitHub push 每次重试前等待秒数\n", cfg->github_retry_delay_sec);
+    fprintf(fp, "git_timeout_sec=%d # Git 命令超时时间，单位秒，当前保留用于兼容配置\n\n", cfg->git_timeout_sec);
 
     fprintf(fp, "# ── Git 代理（示例：http://127.0.0.1:7890）──\n");
-    fprintf(fp, "git_http_proxy=%s\n", cfg->git_http_proxy);
-    fprintf(fp, "git_https_proxy=%s\n", cfg->git_https_proxy);
+    fprintf(fp, "git_http_proxy=%s # Git HTTP 代理地址，留空表示不用代理\n", cfg->git_http_proxy);
+    fprintf(fp, "git_https_proxy=%s # Git HTTPS 代理地址，留空表示不用代理\n\n", cfg->git_https_proxy);
+
+    fprintf(fp, "# ── Cloudflare R2 上传（密钥可留空，程序会读取环境变量）──\n");
+    fprintf(fp, "r2_upload_enabled=%s # 是否启用 Cloudflare R2 自动上传 true=上传 false=跳过\n", cfg->r2_upload_enabled ? "true" : "false");
+    fprintf(fp, "r2_account_id=%s # Cloudflare 账户 ID，用于拼接默认 R2 S3 API 端点\n", cfg->r2_account_id);
+    fprintf(fp, "r2_bucket=%s # R2 存储桶名称\n", cfg->r2_bucket);
+    fprintf(fp, "r2_endpoint=%s # 自定义 R2 S3 API 端点；留空时使用 https://<account_id>.r2.cloudflarestorage.com\n", cfg->r2_endpoint);
+    fprintf(fp, "r2_access_key_id=%s # R2 Access Key ID；留空时读取 r2_access_key_env 指定的环境变量\n", cfg->r2_access_key_id);
+    fprintf(fp, "r2_secret_access_key=%s # R2 Secret Access Key；留空时读取 r2_secret_key_env 指定的环境变量\n", cfg->r2_secret_access_key);
+    fprintf(fp, "r2_access_key_env=%s # R2 Access Key ID 的环境变量名\n", cfg->r2_access_key_env);
+    fprintf(fp, "r2_secret_key_env=%s # R2 Secret Access Key 的环境变量名\n", cfg->r2_secret_key_env);
+    fprintf(fp, "r2_prefix=%s # R2 对象统一前缀目录，例如 cfip；留空表示桶根目录\n", cfg->r2_prefix);
+    fprintf(fp, "r2_full_path=%s # full_output_file 上传到 R2 的对象名或相对路径\n", cfg->r2_full_path);
+    fprintf(fp, "r2_best_path=%s # best_output_file 上传到 R2 的对象名或相对路径\n", cfg->r2_best_path);
+    fprintf(fp, "r2_include_readme=%s # 是否同时上传 README 文件到 R2\n", cfg->r2_include_readme ? "true" : "false");
+    fprintf(fp, "r2_readme_path=%s # README 上传到 R2 的对象名或相对路径\n", cfg->r2_readme_path);
+    fprintf(fp, "r2_timeout_sec=%d # 单个 R2 文件上传超时时间，单位秒\n", cfg->r2_timeout_sec);
+    fprintf(fp, "r2_retries=%d # R2 上传失败后的最大重试次数\n", cfg->r2_retries);
+    fprintf(fp, "r2_retry_delay_sec=%d # R2 上传每次重试前等待秒数\n", cfg->r2_retry_delay_sec);
     fclose(fp);
     return 1;
 }
@@ -419,6 +504,9 @@ static void clamp_config(Config *cfg) {
     if (cfg->github_push_retries <= 0)    cfg->github_push_retries = 1;
     if (cfg->github_retry_delay_sec < 0)  cfg->github_retry_delay_sec = 0;
     if (cfg->git_timeout_sec <= 0)        cfg->git_timeout_sec = 180;
+    if (cfg->r2_timeout_sec <= 0)         cfg->r2_timeout_sec = 120;
+    if (cfg->r2_retries <= 0)             cfg->r2_retries = 1;
+    if (cfg->r2_retry_delay_sec < 0)      cfg->r2_retry_delay_sec = 0;
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -475,6 +563,7 @@ static void run_setup_wizard(Config *cfg, const char *config_path, int first_run
 
     cfg->NO = prompt_bool("启用优选序号 (#HK_1)", cfg->NO);
     cfg->show_latency = prompt_bool("显示延迟信息 ([xxms])", cfg->show_latency);
+    cfg->show_bandwidth = prompt_bool("显示带宽信息 ([xxMbps])", cfg->show_bandwidth);
     cfg->github_upload_enabled = prompt_bool("启用 GitHub 自动推送", cfg->github_upload_enabled);
 
     read_prompt("GitHub 仓库地址 (https://github.com/user/repo.git)\n"
@@ -500,6 +589,30 @@ static void run_setup_wizard(Config *cfg, const char *config_path, int first_run
     copy_text(cfg->github_full_path, sizeof(cfg->github_full_path), value);
 
     cfg->github_include_readme = prompt_bool("同步 README.MD", cfg->github_include_readme);
+
+    cfg->r2_upload_enabled = prompt_bool("启用 Cloudflare R2 自动上传", cfg->r2_upload_enabled);
+
+    read_prompt("Cloudflare Account ID [默认: 空]: ",
+                value, sizeof(value), cfg->r2_account_id);
+    copy_text(cfg->r2_account_id, sizeof(cfg->r2_account_id), value);
+
+    read_prompt("R2 存储桶名称 [默认: 空]: ",
+                value, sizeof(value), cfg->r2_bucket);
+    copy_text(cfg->r2_bucket, sizeof(cfg->r2_bucket), value);
+
+    read_prompt("R2 Access Key ID（可留空，改用环境变量）[默认: 空]: ",
+                value, sizeof(value), cfg->r2_access_key_id);
+    copy_text(cfg->r2_access_key_id, sizeof(cfg->r2_access_key_id), value);
+
+    read_prompt("R2 Secret Access Key（可留空，改用环境变量）[默认: 空]: ",
+                value, sizeof(value), cfg->r2_secret_access_key);
+    copy_text(cfg->r2_secret_access_key, sizeof(cfg->r2_secret_access_key), value);
+
+    read_prompt("R2 对象前缀目录 [默认: " COL_RESET,
+                value, sizeof(value), cfg->r2_prefix);
+    copy_text(cfg->r2_prefix, sizeof(cfg->r2_prefix), value);
+
+    cfg->r2_include_readme = prompt_bool("同步 README.MD 到 R2", cfg->r2_include_readme);
 
     normalize_github_repo_to_raw(cfg->github_repo, cfg->github_branch,
                                  cfg->raw_base_url, sizeof(cfg->raw_base_url));
@@ -643,13 +756,24 @@ static int ensure_git_available(int *push_available) {
 static int ensure_runtime_environment(Config *cfg, int push_only) {
     int push_available = 0;
     print_section("🧰", "运行前环境检查");
-    if (!ensure_git_available(&push_available)) return 0;
-    if (!push_available) {
-        cfg->github_upload_enabled = 0;
-        if (push_only) {
-            fprintf(stderr, "  %s仅推送模式需要 Git，已停止运行。%s\n", COL_RED, COL_RESET);
+    if (cfg->github_upload_enabled || push_only) {
+        if (!ensure_git_available(&push_available)) return 0;
+        if (!push_available) {
+            cfg->github_upload_enabled = 0;
+            if (push_only && !cfg->r2_upload_enabled) {
+                fprintf(stderr, "  %s仅推送模式需要至少启用一个可用上传目标，已停止运行。%s\n", COL_RED, COL_RESET);
+                return 0;
+            }
+        }
+    } else {
+        printf("  %s— GitHub 推送未启用，跳过 Git 检查%s\n", COL_DIM, COL_RESET);
+    }
+    if (cfg->r2_upload_enabled) {
+        if (!command_available("curl.exe")) {
+            fprintf(stderr, "  %s错误：R2 上传需要 curl.exe，请先安装或加入 PATH。%s\n", COL_RED, COL_RESET);
             return 0;
         }
+        printf("  %s✓ curl 已就绪，R2 上传环境检查通过%s\n", COL_GREEN, COL_RESET);
     }
     return 1;
 }
@@ -1098,15 +1222,18 @@ static int write_results(const char *path, const SpeedArray *results, const Conf
         region_rank++;
         format_output_region(r->node.region, cfg->NO, region_rank, output_region, sizeof(output_region));
         fprintf(fp, "%s:%d#%s", r->node.ip, r->node.port, output_region);
-        if (r->is_fast && cfg->show_latency)
-            fprintf(fp, " [%s%.0fms]", cfg->fast_label, r->latency_ms);
-        else if (r->is_fast) {
+        if (r->is_fast) {
             copy_text(fast_label, sizeof(fast_label), cfg->fast_label);
             rtrim_inplace(fast_label);
             fprintf(fp, " [%s]", fast_label);
         }
-        else if (cfg->show_latency)
-            fprintf(fp, " [%.0fms]", r->latency_ms);
+        if (cfg->show_latency || cfg->show_bandwidth) {
+            fprintf(fp, " [");
+            if (cfg->show_latency) fprintf(fp, "%.0fms", r->latency_ms);
+            if (cfg->show_latency && cfg->show_bandwidth) fprintf(fp, " ");
+            if (cfg->show_bandwidth) fprintf(fp, "%.0fMbps", r->speed_mbps);
+            fprintf(fp, "]");
+        }
         fprintf(fp, "\n");
     }
     fclose(fp);
@@ -1221,6 +1348,26 @@ static void path_join(char *out, size_t size, const char *a, const char *b) {
     if (n > 0 && out[n-1] != '\\' && out[n-1] != '/')
         strncat(out, "\\", size - strlen(out) - 1);
     strncat(out, b, size - strlen(out) - 1);
+}
+
+static void append_url_path(char *url, size_t size, const char *path) {
+    const char *p = path;
+    if (!path || !*path) return;
+    while (*p == '/' || *p == '\\') p++;
+    if (url[0] && url[strlen(url) - 1] != '/')
+        strncat(url, "/", size - strlen(url) - 1);
+    while (*p) {
+        char ch = (*p == '\\') ? '/' : *p;
+        char part[2] = { ch, '\0' };
+        strncat(url, part, size - strlen(url) - 1);
+        p++;
+    }
+}
+
+static void r2_object_key(const Config *cfg, const char *path, char *out, size_t out_size) {
+    out[0] = '\0';
+    append_url_path(out, out_size, cfg->r2_prefix);
+    append_url_path(out, out_size, path);
 }
 
 static int copy_file_to_workdir(const char *src, const char *workdir, const char *dst_rel) {
@@ -1339,6 +1486,91 @@ static int github_sync(const Config *cfg) {
 }
 
 /* ──────────────────────────────────────────────────────────
+   Cloudflare R2 上传
+   ────────────────────────────────────────────────────────── */
+
+static void r2_endpoint_url(const Config *cfg, char *out, size_t out_size) {
+    if (cfg->r2_endpoint[0]) {
+        copy_text(out, out_size, cfg->r2_endpoint);
+        return;
+    }
+    snprintf(out, out_size, "https://%s.r2.cloudflarestorage.com", cfg->r2_account_id);
+}
+
+static int r2_upload_file(const Config *cfg, const char *local_path, const char *object_path) {
+    const char *access_key = cfg->r2_access_key_id[0] ? cfg->r2_access_key_id : getenv(cfg->r2_access_key_env);
+    const char *secret_key = cfg->r2_secret_access_key[0] ? cfg->r2_secret_access_key : getenv(cfg->r2_secret_key_env);
+    char endpoint[1200], object_key[1024], url[2600], userpwd[1800];
+    char q_file[MAX_PATH + 8], q_url[2800], q_userpwd[2000], cmd[8192];
+    int attempt;
+
+    if (!access_key || !*access_key || !secret_key || !*secret_key) {
+        fprintf(stderr, "  %s错误：R2 密钥未配置，请填写 r2_access_key_id/r2_secret_access_key 或设置环境变量。%s\n",
+                COL_RED, COL_RESET);
+        return 0;
+    }
+    if (!file_exists(local_path)) {
+        fprintf(stderr, "  %s错误：R2 上传源文件不存在：%s%s\n", COL_RED, local_path, COL_RESET);
+        return 0;
+    }
+
+    r2_endpoint_url(cfg, endpoint, sizeof(endpoint));
+    r2_object_key(cfg, object_path, object_key, sizeof(object_key));
+    copy_text(url, sizeof(url), endpoint);
+    append_url_path(url, sizeof(url), cfg->r2_bucket);
+    append_url_path(url, sizeof(url), object_key);
+    snprintf(userpwd, sizeof(userpwd), "%s:%s", access_key, secret_key);
+
+    quote_arg(local_path, q_file, sizeof(q_file));
+    quote_arg(url, q_url, sizeof(q_url));
+    quote_arg(userpwd, q_userpwd, sizeof(q_userpwd));
+
+    for (attempt = 1; attempt <= cfg->r2_retries; attempt++) {
+        snprintf(cmd, sizeof(cmd),
+                 "curl.exe -fSL --connect-timeout %d --max-time %d"
+                 " --retry 0 --aws-sigv4 \"aws:amz:auto:s3\" --user %s"
+                 " -T %s %s",
+                 cfg->r2_timeout_sec < 10 ? cfg->r2_timeout_sec : 10,
+                 cfg->r2_timeout_sec, q_userpwd, q_file, q_url);
+        if (run_command(cmd) == 0) {
+            printf("  %s✓ R2 已上传：%s%s\n", COL_GREEN, object_key, COL_RESET);
+            return 1;
+        }
+        if (attempt < cfg->r2_retries) {
+            printf("  %s⚠ R2 上传失败，%d 秒后重试（%d/%d）...%s\n",
+                   COL_YELLOW, cfg->r2_retry_delay_sec,
+                   attempt + 1, cfg->r2_retries, COL_RESET);
+            Sleep((DWORD)cfg->r2_retry_delay_sec * 1000);
+        }
+    }
+
+    fprintf(stderr, "  %s✗ R2 上传失败：%s%s\n", COL_RED, object_key, COL_RESET);
+    return 0;
+}
+
+static int r2_sync(const Config *cfg) {
+    if (!cfg->r2_upload_enabled) {
+        printf("  %s— R2 上传已关闭（setting.config）%s\n", COL_DIM, COL_RESET);
+        return 1;
+    }
+    if (!cfg->r2_bucket[0]) {
+        fprintf(stderr, "  %s错误：r2_bucket 未配置%s\n", COL_RED, COL_RESET);
+        return 0;
+    }
+    if (!cfg->r2_endpoint[0] && !cfg->r2_account_id[0]) {
+        fprintf(stderr, "  %s错误：r2_account_id 未配置；或填写 r2_endpoint 自定义端点%s\n", COL_RED, COL_RESET);
+        return 0;
+    }
+
+    if (!r2_upload_file(cfg, cfg->full_output_file, cfg->r2_full_path)) return 0;
+    if (!r2_upload_file(cfg, cfg->best_output_file, cfg->r2_best_path)) return 0;
+    if (cfg->r2_include_readme && file_exists(cfg->readme_file)) {
+        if (!r2_upload_file(cfg, cfg->readme_file, cfg->r2_readme_path)) return 0;
+    }
+    return 1;
+}
+
+/* ──────────────────────────────────────────────────────────
    帮助信息
    ────────────────────────────────────────────────────────── */
 
@@ -1349,8 +1581,12 @@ static void print_usage(void) {
     printf("  %s--NO [true|false]%s  启用或关闭优选序号输出\n",                  COL_CYAN, COL_RESET);
     printf("  %s--show-latency [true|false]%s  显示或隐藏输出中的延迟\n",        COL_CYAN, COL_RESET);
     printf("  %s--no-latency%s    隐藏输出中的延迟\n",                           COL_CYAN, COL_RESET);
+    printf("  %s--show-bandwidth [true|false]%s  显示或隐藏输出中的带宽\n",       COL_CYAN, COL_RESET);
+    printf("  %s--no-bandwidth%s   隐藏输出中的带宽\n",                           COL_CYAN, COL_RESET);
     printf("  %s--upload%s         本次运行强制开启 GitHub 推送\n",               COL_CYAN, COL_RESET);
     printf("  %s--no-upload%s      本次运行禁用 GitHub 推送\n",                   COL_CYAN, COL_RESET);
+    printf("  %s--r2-upload%s      本次运行强制开启 R2 上传\n",                   COL_CYAN, COL_RESET);
+    printf("  %s--no-r2-upload%s   本次运行禁用 R2 上传\n",                       COL_CYAN, COL_RESET);
     printf("  %s--push-only%s      仅更新 README 并推送现有结果\n",               COL_CYAN, COL_RESET);
     printf("  %s--help%s           显示本帮助\n",                                 COL_CYAN, COL_RESET);
 }
@@ -1401,6 +1637,8 @@ int main(int argc, char **argv) {
     for (i = 1; i < (size_t)argc; i++) {
         if      (strcmp(argv[i], "--upload")    == 0) cfg.github_upload_enabled = 1;
         else if (strcmp(argv[i], "--no-upload") == 0) cfg.github_upload_enabled = 0;
+        else if (strcmp(argv[i], "--r2-upload") == 0) cfg.r2_upload_enabled = 1;
+        else if (strcmp(argv[i], "--no-r2-upload") == 0) cfg.r2_upload_enabled = 0;
         else if (strcmp(argv[i], "--NO")        == 0) {
             if (i + 1 < (size_t)argc && argv[i + 1][0] != '-')
                 cfg.NO = parse_bool(argv[++i], cfg.NO);
@@ -1417,6 +1655,14 @@ int main(int argc, char **argv) {
         }
         else if (strncmp(argv[i], "--show-latency=", 15) == 0) cfg.show_latency = parse_bool(argv[i] + 15, cfg.show_latency);
         else if (strcmp(argv[i], "--no-latency") == 0) cfg.show_latency = 0;
+        else if (strcmp(argv[i], "--show-bandwidth") == 0) {
+            if (i + 1 < (size_t)argc && argv[i + 1][0] != '-')
+                cfg.show_bandwidth = parse_bool(argv[++i], cfg.show_bandwidth);
+            else
+                cfg.show_bandwidth = 1;
+        }
+        else if (strncmp(argv[i], "--show-bandwidth=", 17) == 0) cfg.show_bandwidth = parse_bool(argv[i] + 17, cfg.show_bandwidth);
+        else if (strcmp(argv[i], "--no-bandwidth") == 0) cfg.show_bandwidth = 0;
         else if (strcmp(argv[i], "--push-only") == 0) push_only = 1;
         else if (strcmp(argv[i], "--setup")     == 0) setup_requested = 1;
         else if (strcmp(argv[i], "--help")      == 0 ||
@@ -1437,7 +1683,9 @@ int main(int argc, char **argv) {
     print_kv("每区取前 N：",  "%d", cfg.top_per_region);
     print_kv("优选序号：",    "%s", cfg.NO ? "开启" : "关闭");
     print_kv("延迟显示：",    "%s", cfg.show_latency ? "开启" : "关闭");
+    print_kv("带宽显示：",    "%s", cfg.show_bandwidth ? "开启" : "关闭");
     print_kv("GitHub 推送：", "%s", cfg.github_upload_enabled ? "启用" : "关闭");
+    print_kv("R2 上传：",     "%s", cfg.r2_upload_enabled ? "启用" : "关闭");
 
     if (!config_loaded || setup_requested) {
         run_setup_wizard(&cfg, config_path, !config_loaded);
@@ -1451,7 +1699,9 @@ int main(int argc, char **argv) {
     if (push_only) {
         print_section("☁", "仅推送模式");
         if (cfg.update_readme) write_readme(&cfg);
-        return github_sync(&cfg) ? 0 : 1;
+        if (!github_sync(&cfg)) return 1;
+        if (!r2_sync(&cfg)) return 1;
+        return 0;
     }
 
     time(&t_start);
@@ -1496,9 +1746,10 @@ int main(int argc, char **argv) {
     printf("  %s✓ 高速优选 → %s%s\n", COL_GREEN, cfg.best_output_file, COL_RESET);
     if (cfg.update_readme) write_readme(&cfg);
 
-    /* ── GitHub 推送 ── */
-    print_section("☁", "GitHub 推送");
+    /* ── 上传 ── */
+    print_section("☁", "上传同步");
     if (!github_sync(&cfg)) return 1;
+    if (!r2_sync(&cfg)) return 1;
 
     /* ── 最终汇总 ── */
     time(&t_end);
