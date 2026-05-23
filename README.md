@@ -1,6 +1,6 @@
 # Cloudflare IP 优选工具
 
-一个适用于 Windows 的 Cloudflare IP 自动测速工具。
+一个适用于 Windows和linux 的 Cloudflare IP 自动测速工具。
 
 它可以自动下载 IP 列表，批量测试 TCP 延迟和下载速度，筛选出更快的节点，并生成可直接用于订阅的 `best_ips.txt`。你也可以让它把结果自动上传到 GitHub 或 Cloudflare R2。
 
