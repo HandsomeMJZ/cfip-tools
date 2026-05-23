@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import base64
 import heapq
 import os
 import shutil
@@ -19,23 +18,27 @@ from tqdm import tqdm
 
 DEFAULT_INPUT_FILE = Path("ips.txt")
 DEFAULT_INPUT_URL = "https://zip.cm.edu.kg/all.txt"
+#DEFAULT_INPUT_URL = "https://countrymerge.pages.dev/all.txt"
 DEFAULT_INPUT_DOWNLOAD_TIMEOUT = 30.0
 DEFAULT_BEST_OUTPUT_FILE = Path("best_ips.txt")
 DEFAULT_FULL_OUTPUT_FILE = Path("full_ips.txt")
 
 DEFAULT_TCP_TIMEOUT = 1.5
-DEFAULT_TCP_WORKERS = 500
+DEFAULT_TCP_WORKERS = 200
 
 DEFAULT_SPEED_TIMEOUT = 6.0
 DEFAULT_SPEED_PROCESS_BUFFER = 8.0
-DEFAULT_SPEED_WORKERS = 16
-DEFAULT_MIN_SPEED_MBPS = 10.0
+DEFAULT_SPEED_WORKERS = 5
+DEFAULT_MIN_SPEED_MBPS = 16
 DEFAULT_TOP_PER_REGION = 10
 
 SPEED_DOMAIN = "speed.cloudflare.com"
 SPEED_PATH = "/__down"
 SPEED_BYTES = 2 * 1024 * 1024
-FAST_LABEL = "优选高速 "
+FAST_LABEL = "高速 by Jz "
+MY_REGION = "KG2"
+MY_SUPPLEMENT_TRIGGER_COUNT = 2
+MY_SUPPLEMENT_LIMIT = 2
 
 
 if sys.platform == "win32":
@@ -59,18 +62,6 @@ def strip_region_number(region: str) -> str:
 
 
 @dataclass(frozen=True)
-class GitHubConfig:
-    repo: str | None
-    branch: str
-    target_path: Path | None
-    workdir: Path
-    message: str
-    token_env: str
-    timeout: float
-    enabled: bool
-
-
-@dataclass(frozen=True)
 class AppConfig:
     input_file: Path
     full_output_file: Path
@@ -84,7 +75,8 @@ class AppConfig:
     top_per_region: int
     verbose: bool
     numbered_regions: bool
-    github: GitHubConfig
+    show_latency: bool   # whether to include latency in output labels
+    show_mbps: bool      # whether to include download speed in output labels
 
 
 @dataclass(frozen=True)
@@ -137,42 +129,40 @@ def parse_args() -> AppConfig:
         default=os.environ.get("NO", "false"),
         help="number output region labels, for example #HK_1",
     )
-    parser.add_argument("--no-github-sync", action="store_true", help="disable built-in GitHub sync")
-    parser.add_argument("--github-repo", default=os.environ.get("GITHUB_REPO"), help="repository URL or GITHUB_REPO")
+    # ── label display options ──────────────────────────────────────────────────
     parser.add_argument(
-        "--github-branch",
-        default=os.environ.get("GITHUB_BRANCH", "main"),
-        help="branch to push to",
+        "--show-latency",
+        nargs="?",
+        const="true",
+        default=os.environ.get("SHOW_LATENCY", "true"),
+        metavar="BOOL",
+        help="include latency (ms) in output labels (default: true; env: SHOW_LATENCY)",
     )
     parser.add_argument(
-        "--github-path",
-        type=Path,
-        default=Path(os.environ["GITHUB_PATH"]) if os.environ.get("GITHUB_PATH") else None,
-        help="path for best output inside the repository",
+        "--show-mbps",
+        nargs="?",
+        const="true",
+        default=os.environ.get("SHOW_MBPS", "false"),
+        metavar="BOOL",
+        help="include download speed (Mbps) in output labels (default: false; env: SHOW_MBPS)",
     )
-    parser.add_argument(
-        "--github-workdir",
-        type=Path,
-        default=Path(os.environ.get("GITHUB_WORKDIR", ".github-sync")),
-        help="local clone directory used for sync",
-    )
-    parser.add_argument(
-        "--github-message",
-        default=os.environ.get("GITHUB_MESSAGE", "Update best IP results"),
-        help="commit message used for sync",
-    )
-    parser.add_argument(
-        "--github-token-env",
-        default=os.environ.get("GITHUB_TOKEN_ENV", "GITHUB_TOKEN"),
-        help="environment variable containing a GitHub token",
-    )
-    parser.add_argument("--github-timeout", type=float, default=180, help="git command timeout in seconds")
+    # ──────────────────────────────────────────────────────────────────────────
     args = parser.parse_args()
 
     try:
         numbered_regions = parse_bool(args.NO)
     except ValueError as exc:
         parser.error(str(exc))
+
+    try:
+        show_latency = parse_bool(args.show_latency) if args.show_latency is not None else True
+    except ValueError as exc:
+        parser.error(f"--show-latency: {exc}")
+
+    try:
+        show_mbps = parse_bool(args.show_mbps) if args.show_mbps is not None else False
+    except ValueError as exc:
+        parser.error(f"--show-mbps: {exc}")
 
     return AppConfig(
         input_file=args.input,
@@ -187,16 +177,8 @@ def parse_args() -> AppConfig:
         top_per_region=args.top,
         verbose=args.verbose,
         numbered_regions=numbered_regions,
-        github=GitHubConfig(
-            repo=args.github_repo,
-            branch=args.github_branch,
-            target_path=args.github_path,
-            workdir=args.github_workdir,
-            message=args.github_message,
-            token_env=args.github_token_env,
-            timeout=args.github_timeout,
-            enabled=bool(args.github_repo and not args.no_github_sync),
-        ),
+        show_latency=show_latency,
+        show_mbps=show_mbps,
     )
 
 
@@ -438,161 +420,115 @@ async def run_speed_tests(
     return results
 
 
-def write_results(path: Path, results: Iterable[SpeedResult], numbered_regions: bool) -> None:
+def build_label(result: SpeedResult, *, show_latency: bool, show_mbps: bool) -> str:
+    """Build the bracket annotation appended to each output line.
+
+    Examples (with various flag combinations):
+      show_latency=True,  show_mbps=False  →  [高速 by Jz 12ms]
+      show_latency=False, show_mbps=True   →  [高速 by Jz 123.45Mbps]
+      show_latency=True,  show_mbps=True   →  [高速 by Jz 12ms | 123.45Mbps]
+      show_latency=False, show_mbps=False  →  [高速 by Jz]          (fast only)
+                                           →  []                      (not fast, no info)
+    """
+    parts: list[str] = []
+    fast_prefix = FAST_LABEL if result.is_fast else ""
+
+    if show_latency:
+        parts.append(f"{format_latency_ms(result.latency_ms)}ms")
+    if show_mbps:
+        parts.append(f"{result.speed_mbps:.0f}M")
+
+    inner = " | ".join(parts) if parts else ""
+
+    if fast_prefix and inner:
+        return f"[{fast_prefix}{inner}]"
+    if fast_prefix:
+        return f"[{fast_prefix.rstrip()}]"
+    if inner:
+        return f"[{inner}]"
+    return ""
+
+
+def write_results(
+    path: Path,
+    results: Iterable[SpeedResult],
+    numbered_regions: bool,
+    *,
+    show_latency: bool = True,
+    show_mbps: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as file:
         region_counts: dict[str, int] = defaultdict(int)
         for result in results:
-            label = FAST_LABEL if result.is_fast else ""
             region_counts[result.node.region] += 1
-            region = f"{result.node.region}_{region_counts[result.node.region]}" if numbered_regions else result.node.region
-            file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{result.latency_ms}ms]\n")
+            region = (
+                f"{result.node.region}_{region_counts[result.node.region]}"
+                if numbered_regions
+                else result.node.region
+            )
+            label = build_label(result, show_latency=show_latency, show_mbps=show_mbps)
+            suffix = f" {label}" if label else ""
+            file.write(f"{result.node.ip}:{result.node.port}#{region}{suffix}\n")
+
+
+def format_latency_ms(latency_ms: float) -> str:
+    return str(max(0, int(round(latency_ms))))
 
 
 def filter_fast_results(results: Iterable[SpeedResult]) -> list[SpeedResult]:
     return [result for result in results if result.is_fast]
 
 
-class GitHubSync:
-    def __init__(self, config: GitHubConfig) -> None:
-        self.config = config
-        self.token = os.environ.get(config.token_env)
+def is_region(node: Node, region: str) -> bool:
+    return node.region.upper() == region.upper()
 
-    def sync(self, files: Sequence[tuple[Path, Path | None]]) -> bool:
-        if not self.config.enabled or not self.config.repo:
-            return False
-        if not self.token:
-            print(
-                f"GitHub sync warning: {self.config.token_env} is not set; "
-                "push may fail without saved git credentials"
-            )
 
-        normalized = self._normalize_files(files)
-        if not normalized:
-            print("GitHub sync skipped: no result files to push")
-            return False
+def node_key(node: Node) -> tuple[str, int, str]:
+    return (node.ip, node.port, node.region.upper())
 
-        try:
-            self._ensure_worktree()
-            for source, destination in normalized:
-                target_file = self.config.workdir / destination
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target_file)
-                self._git(["add", str(destination)])
 
-            if not self._has_staged_changes():
-                if self._push_if_ahead():
-                    print(f"GitHub sync done: pushed pending commit(s) to {self.config.repo} ({self.config.branch})")
-                else:
-                    print("GitHub sync skipped: result files have no changes")
-                return True
+async def supplement_my_results(
+    best_results: Sequence[SpeedResult],
+    tcp_results: Sequence[TcpResult],
+    config: AppConfig,
+) -> list[SpeedResult]:
+    results = list(best_results)
+    my_count = sum(1 for result in results if is_region(result.node, MY_REGION))
+    if my_count > MY_SUPPLEMENT_TRIGGER_COUNT:
+        return results
 
-            self._git(
-                [
-                    "-c",
-                    "user.name=IP Update Bot",
-                    "-c",
-                    "user.email=ip-update-bot@users.noreply.github.com",
-                    "commit",
-                    "-m",
-                    self.config.message,
-                ]
-            )
-            self._git(["push", "origin", self.config.branch])
-            names = ", ".join(str(destination) for _, destination in normalized)
-            print(f"GitHub sync done: pushed {names} to {self.config.repo} ({self.config.branch})")
-            return True
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            print(f"GitHub sync failed: {exc}")
-            return False
+    my_candidates = [result for result in tcp_results if is_region(result.node, MY_REGION)]
+    if not my_candidates:
+        print("MY supplement skipped: no TCP reachable MY nodes")
+        return results
 
-    def _normalize_files(self, files: Sequence[tuple[Path, Path | None]]) -> list[tuple[Path, Path]]:
-        normalized: list[tuple[Path, Path]] = []
-        for source, target_path in files:
-            if not source.exists():
-                print(f"GitHub sync skipped missing file: {source}")
-                continue
-            destination = target_path or Path(source.name)
-            if destination.is_absolute() or ".." in destination.parts:
-                raise RuntimeError(f"target path must be relative: {destination}")
-            normalized.append((source, destination))
-        return normalized
+    print(
+        f"MY nodes in best output: {my_count}; "
+        f"retesting all {len(my_candidates)} TCP reachable MY node(s)"
+    )
+    tested_my_results = await run_speed_tests(
+        my_candidates,
+        timeout=config.speed_timeout,
+        process_buffer=config.speed_process_buffer,
+        workers=config.speed_workers,
+        min_speed=config.min_speed_mbps,
+        verbose=config.verbose,
+    )
 
-    def _ensure_worktree(self) -> None:
-        git_dir = self.config.workdir / ".git"
-        if git_dir.exists():
-            self._git(["fetch", "origin", self.config.branch])
-            self._git(["reset", "--hard"])
-            self._git(["checkout", "-B", self.config.branch, f"origin/{self.config.branch}"])
-            return
-
-        if self.config.workdir.exists() and any(self.config.workdir.iterdir()):
-            raise RuntimeError(f"sync directory is not an empty git repository: {self.config.workdir}")
-
-        self.config.workdir.parent.mkdir(parents=True, exist_ok=True)
-        self._git(
-            ["clone", "--branch", self.config.branch, "--single-branch", self.config.repo, str(self.config.workdir)],
-            cwd=None,
-        )
-
-    def _has_staged_changes(self) -> bool:
-        diff = self._git(["diff", "--cached", "--quiet"], check=False)
-        if diff.returncode == 0:
-            return False
-        if diff.returncode == 1:
-            return True
-        raise RuntimeError(diff.stderr.strip() or "git diff --cached --quiet failed")
-
-    def _push_if_ahead(self) -> bool:
-        ahead = self._git(["rev-list", "--count", f"origin/{self.config.branch}..HEAD"], check=False)
-        try:
-            ahead_count = int(ahead.stdout.strip()) if ahead.returncode == 0 and ahead.stdout.strip() else 0
-        except ValueError:
-            ahead_count = 0
-
-        if ahead_count <= 0:
-            return False
-        print(f"GitHub sync: pushing {ahead_count} pending local commit(s)")
-        self._git(["push", "origin", self.config.branch])
-        return True
-
-    def _git(
-        self,
-        args: Sequence[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        git = shutil.which("git")
-        if git is None:
-            raise RuntimeError("git command not found")
-
-        command = [git]
-        header = self._auth_header()
-        if header:
-            command.extend(["-c", f"http.https://github.com/.extraheader={header}"])
-        if cwd is None and args[:1] != ["clone"]:
-            cwd = self.config.workdir
-        command.extend(args)
-
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=self.config.timeout,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        if check and result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or f"git exited with {result.returncode}"
-            raise RuntimeError(message)
-        return result
-
-    def _auth_header(self) -> str | None:
-        if not self.token:
-            return None
-        value = base64.b64encode(f"x-access-token:{self.token}".encode("utf-8")).decode("ascii")
-        return f"AUTHORIZATION: basic {value}"
+    existing_nodes = {node_key(result.node) for result in results}
+    additions = [
+        result
+        for result in tested_my_results
+        if node_key(result.node) not in existing_nodes and result.speed_mbps > 0
+    ]
+    additions.sort(key=lambda item: (-item.speed_mbps, item.latency_ms, item.node.ip, item.node.port))
+    selected = additions[:MY_SUPPLEMENT_LIMIT]
+    if selected:
+        results.extend(selected)
+        results.sort(key=lambda item: (item.node.region, item.latency_ms, -item.speed_mbps))
+    print(f"MY supplement added: {len(selected)}")
+    return results
 
 
 async def run(config: AppConfig) -> int:
@@ -640,18 +576,22 @@ async def run(config: AppConfig) -> int:
     else:
         speed_results = []
 
-    best_results = filter_fast_results(speed_results)
-    write_results(config.full_output_file, speed_results, config.numbered_regions)
-    write_results(config.best_output_file, best_results, config.numbered_regions)
+    best_results = await supplement_my_results(filter_fast_results(speed_results), tcp_results, config)
+    write_results(
+        config.full_output_file,
+        speed_results,
+        config.numbered_regions,
+        show_latency=config.show_latency,
+        show_mbps=config.show_mbps,
+    )
+    write_results(
+        config.best_output_file,
+        best_results,
+        config.numbered_regions,
+        show_latency=config.show_latency,
+        show_mbps=config.show_mbps,
+    )
     print_summary(config, len(nodes), len(tcp_results), len(speed_results), len(best_results))
-
-    if config.github.enabled:
-        GitHubSync(config.github).sync(
-            [
-                (config.full_output_file, None),
-                (config.best_output_file, config.github.target_path),
-            ]
-        )
     return 0
 
 
@@ -669,6 +609,7 @@ def print_summary(
     print(f"Fast tagged: {fast_count}")
     print(f"Full output: {config.full_output_file}")
     print(f"Best output: {config.best_output_file}")
+    print(f"Label: latency={'on' if config.show_latency else 'off'}, mbps={'on' if config.show_mbps else 'off'}")
 
 
 def main() -> int:
